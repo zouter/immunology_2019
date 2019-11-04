@@ -1,0 +1,228 @@
+---
+title: "Immunology project for computation biologists"
+output: github_document
+bibliography: library.bib
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(dplyr)
+library(tidyr)
+library(tibble)
+library(readr)
+```
+
+The goal of this project is to design a pooled CRISPR screen to study an immunological process of your choice.
+
+## Introduction to pooled CRISPR screens combined with single-cell RNA sequencing
+
+In a pooled CRISPR screen, cells are transfected by a library of vectors that all target different genes in different ways. Each of these vectors is barcoded so that we can later derive which cell was targeted by which vector. A couple of hours after transfection, cells are profiled using single-cell (RNA) sequencing techniques [@wagner_revealing_2016]. After some computational analyses, we derive for each cell it's expression profile and the vectors by which the cells were transfected.
+
+Most often, a gene is knocked-out (loss-of-function), for example Perturb-Seq [@dixitPerturbseqDissectingMolecular2016] or CROP-Seq [@datlingerPooledCRISPRScreening2017]). But genes can also be targeted in other ways, for example by overexpression (gain-of-function) using CRISPRa [@wangMultiplexedActivationEndogenous2019]. The possibilities are basically endless; one might imagine that libraries will be designed to target individual point mutations [@anzaloneSearchandreplaceGenomeEditing2019].
+
+Most screens until now were performed _in vitro_, but exploring _in vivo_ screens is probably not far off. The main limiting factor here is making sure that the correct cells are transfected; one solution for immunology might be to do an adoptive transfer of bone marrow cells which were transfected.
+
+## The project
+
+Doing a pooled screen can be very expensive. To get enough signal over noise, you need to profile enough cells (hundreds) for each vector, so checking the effect of 100 vectors requires you to profie hundreds of thousands of cells, and with about \$0.5-\$1 per cell, .... you can do the calculation!
+
+To lower the cost, we typically want to do a targeted screen, where we narrow down to a subset of genes. This may be based on function (e.g. transcription factors) and expression pattern (e.g. genes specific to alveolar macrophages).
+
+In this example, we're going to design a screen for transcription factors that may be important for alveolar macrophages. For the project, you should design a screen for a different topic. Feel free to explore and be creative!
+
+## Selecting potential genes based on function
+
+```{r, message=FALSE}
+library(org.Mm.eg.db)
+```
+
+GO:0003700 is the Gene Ontology identifier for "DNA-binding transcription factor activity"
+
+You can explore the Gene Ontology at https://www.ebi.ac.uk/QuickGO/term/GO:0003700
+
+Our expression dataset uses gene symbols, so we have to convert the entrez ids
+
+```{r}
+tfs_entrezid <- as.list(org.Mm.egGO2ALLEGS)$`GO:0003700`
+tfs <- unique(AnnotationDbi::select(org.Mm.eg.db, keys=tfs_entrezid, columns=c("SYMBOL"), keytype="ENTREZID")$SYMBOL)
+```
+
+```{r}
+length(tfs)
+```
+
+
+## Selecting potential genes based on expression
+
+```{r, message=FALSE}
+library(limma)
+```
+
+### Using ImmGen RNA-seq
+
+The ImmGen consortium has generated bulk gene expression dataset of a lot of immune cells. These datasets are generated using a standardized protocol to limit the batch effects, and the exact FACS gating strategies are (in most cases) provided so that the sorting can be reproduced (e.g. http://rstats.immgen.org/Skyline/resources/Sorting_PDFs_OSMNP/Mo.6Chi11b+.APAP.36h.Lv.pdf).
+
+The most extensive dataset was generated using microarrays:
+
+- To browse the data: http://www.immgen.org/databrowser/index.html 
+- Data can be downloaded at https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE15907 and https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE37448
+
+Nowadays, these is also an extensive RNA-seq dataset available:
+
+- Browsing: http://rstats.immgen.org/Skyline/skyline.html
+- ImmGen ULI RNASeq, containing an overview of all immune populations: https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE127267
+- ImmGen MNP OpenSource, a community-based dataset because of the extensive heterogeneity and the expertise required for correct sorting [@OpensourceImmGenMononuclear2016]: https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE122108
+
+We download the MNP dataset here:
+```{r}
+# geo <- getGEO("GSE122108")
+if (!file.exists("data/GSE122108_Gene_count_table.csv.gz")) {
+  curl::curl_download("https://www.ncbi.nlm.nih.gov/geo/download/?acc=GSE122108&format=file&file=GSE122108_Gene_count_table.csv.gz", "data/GSE122108_Gene_count_table.csv.gz")
+}
+```
+
+```{r}
+# read in the counts matrix
+counts_df <- read.table("data/GSE122108_Gene_count_table.csv.gz", header = TRUE, stringsAsFactors = FALSE)
+counts <- as.matrix(counts_df[, 2:ncol(counts_df)])
+rownames(counts) <- counts_df$gene_symbol
+# colnames(counts) <- gsub('-', 'min', colnames(counts)) # R doesnt like - or + signs in names
+# colnames(counts) <- gsub('\\+', 'plus', colnames(counts))
+
+# remove genes that are very lowly expressed
+counts <- counts[apply(counts, 1, max) >= 10, ]
+
+# create a dataframe with information on each sample
+sample_info <- data.frame(
+  sample_id =  colnames(counts),
+  population_id = gsub("(.*)\\.[0-9]*", "\\1", colnames(counts)),
+  stringsAsFactors = FALSE
+)
+```
+
+```{r}
+head(sample_info, 20)
+```
+
+We can use limma-voom to find genes that are differentially expressed between two populations. Let's first explore how to get differentially expressed genes between two populations of interest, for example Kupffer cells and alveolar macrophages:
+
+```{r}
+population_ids_oi <- c("MF.alv.11cp64pSiglecFp.Lu","MF.KC.Clec4FpTim4p64p.Lv")
+sample_info_oi <- sample_info %>% 
+  filter(population_id %in% population_ids_oi)
+counts_oi <- counts[, sample_info_oi$sample_id]
+
+group <- sample_info_oi$population_id
+mm <- model.matrix(~0 + group)
+y <- voom(counts_oi, mm, plot = T)
+```
+
+```{r}
+# construct a linear model with one term: the "group"
+
+fit <- lmFit(y, mm)
+contr <- makeContrasts(paste0("group", population_ids_oi[[1]], "-", "group", population_ids_oi[[2]]), levels = colnames(coef(fit)))
+contr_fit <- contrasts.fit(fit, contr)
+```
+
+```{r}
+ebayes_fit <- eBayes(contr_fit)
+
+top.table <- topTable(ebayes_fit, sort.by = "P", number = Inf)
+```
+
+```{r}
+genes_oi <- top.table %>% 
+  rownames_to_column("gene_id") %>% 
+  filter(adj.P.Val < 0.05, abs(logFC) > 1) %>% 
+  top_n(100, abs(logFC)) %>% 
+  pull(gene_id)
+```
+
+Plot the genes in a heatmap. We will scale the expression per gene.
+```{r}
+expression_oi <- edgeR::cpm(counts_oi)[genes_oi, ]
+expression_oi_scaled <- t(scale(t(expression_oi)))
+pheatmap::pheatmap(expression_oi_scaled)
+```
+
+```{r}
+get_marker_genes <- function(counts, sample_info, populations_reference, population_oi) {
+  # select relevant sample_info and counts
+  sample_info_oi <- sample_info %>% 
+    filter(population_id %in% c(populations_reference, population_oi))
+  counts_oi <- counts[, sample_info_oi$sample_id]
+  counts_oi <- counts_oi[apply(counts_oi, 1, mean) >= 1, ]
+  
+  # build linear model
+  group <- sample_info_oi$population_id
+  mm <- model.matrix(~0 + group)
+  y <- voom(counts_oi, mm)
+  
+  fit <- lmFit(y, mm)
+  
+  # get differential expression for each reference population
+  differential_expression <- lapply(populations_reference, function(population_reference) {
+    contr_formula <- paste0("group", population_oi, "-", "group", population_reference)
+    contr <- makeContrasts(contrasts = contr_formula, levels = colnames(coef(fit)))
+    contr_fit <- contrasts.fit(fit, contr)
+    
+    ebayes_fit <- eBayes(contr_fit)
+    top.table <- topTable(ebayes_fit, sort.by = "P", number = Inf)
+    top.table %>% 
+      rownames_to_column("gene_id") %>% 
+      mutate(
+        population_1 = population_oi,
+        population_2 = population_reference
+      )
+  }) %>% 
+    bind_rows()
+}
+```
+
+
+```{r}
+populations_reference <- c("MF.F.PC","MF.alv.11cp64pSiglecFp.Lu" , "MF.480p.SP")
+population_oi <- "MF.KC.Clec4FpTim4p64p.Lv"
+differential_expression <- get_marker_genes(counts, sample_info, populations_reference, population_oi)
+```
+
+```{r}
+markers <- differential_expression %>% 
+  group_by(gene_id) %>% 
+  summarise(max_adj_pval = max(adj.P.Val), min_logfc = min(logFC)) %>% 
+  filter(max_adj_pval < 0.05, min_logfc > 2) %>% 
+  pull(gene_id)
+
+samples_oi <- sample_info %>% filter(population_id %in% c(population_oi, populations_reference)) %>% pull(sample_id)
+expression_oi <- log2(counts/colSums(counts) + 1)[markers, samples_oi]
+expression_oi_scaled <- t(scale(t(expression_oi)))
+pheatmap::pheatmap(expression_oi_scaled)
+```
+
+## Designing the CRISPR library
+
+```{r}
+genes_oi <- intersect(markers, tfs)
+cat(paste0(genes_oi, collapse = "\n"))
+```
+
+Submit this to https://portals.broadinstitute.org/gpp/public/analysis-tools/sgrna-design (or any related tool)
+
+```{r}
+sgrna_design <- read_tsv("results/sgrna_designs.txt")
+```
+
+Let's choose for each target gene one guide RNA:
+
+```{r}
+sgrna_design %>% 
+  group_by(Input) %>% 
+  top_n(1, `Combined Rank`) %>% 
+  dplyr::select(`Target Gene Symbol`, `sgRNA Sequence`)
+```
+
+Time to start cloning!
+
+## References
