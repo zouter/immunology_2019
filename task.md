@@ -32,15 +32,15 @@ which were transfected.
 ## The project
 
 Doing a pooled screen can be very expensive. To get enough signal over
-noise, you need to profile enough cells (hundreds) for each vector, so
+noise, you need to profile enough cells (thousands) for each vector, so
 checking the effect of 100 vectors requires you to profie hundreds of
 thousands of cells, and with about $0.5-$1 per cell, …. you can do the
 calculation\!
 
 To lower the cost, we typically want to do a targeted screen, where we
-narrow down to a subset of genes. This may be based on function
-(e.g. transcription factors) and expression pattern (e.g. genes
-specific to alveolar macrophages).
+narrow down to a subset of genes, between 10 and 50. This may be based
+on function (e.g. transcription factors) and expression pattern
+(e.g. genes specific to alveolar macrophages).
 
 In this example, we’re going to design a screen for transcription
 factors that may be important for alveolar macrophages. For the project,
@@ -169,100 +169,21 @@ macrophages:
 
 ``` r
 population_ids_oi <- c("MF.alv.11cp64pSiglecFp.Lu","MF.KC.Clec4FpTim4p64p.Lv")
-sample_info_oi <- sample_info %>% 
-  filter(population_id %in% population_ids_oi)
-counts_oi <- counts[, sample_info_oi$sample_id]
-
-group <- sample_info_oi$population_id
-mm <- model.matrix(~0 + group)
-y <- voom(counts_oi, mm, plot = T)
-```
-
-![](task_files/figure-gfm/unnamed-chunk-8-1.png)<!-- -->
-
-``` r
-# construct a linear model with one term: the "group"
-
-fit <- lmFit(y, mm)
-contr <- makeContrasts(paste0("group", population_ids_oi[[1]], "-", "group", population_ids_oi[[2]]), levels = colnames(coef(fit)))
-contr_fit <- contrasts.fit(fit, contr)
-```
-
-``` r
-ebayes_fit <- eBayes(contr_fit)
-
-top.table <- topTable(ebayes_fit, sort.by = "P", number = Inf)
-```
-
-``` r
-genes_oi <- top.table %>% 
-  rownames_to_column("gene_id") %>% 
-  filter(adj.P.Val < 0.05, abs(logFC) > 1) %>% 
-  top_n(100, abs(logFC)) %>% 
-  pull(gene_id)
 ```
 
 Plot the genes in a heatmap. We will scale the expression per gene.
-
-``` r
-expression_oi <- edgeR::cpm(counts_oi)[genes_oi, ]
-expression_oi_scaled <- t(scale(t(expression_oi)))
-pheatmap::pheatmap(expression_oi_scaled)
-```
-
 ![](task_files/figure-gfm/unnamed-chunk-12-1.png)<!-- -->
 
-``` r
-get_marker_genes <- function(counts, sample_info, populations_reference, population_oi) {
-  # select relevant sample_info and counts
-  sample_info_oi <- sample_info %>% 
-    filter(population_id %in% c(populations_reference, population_oi))
-  counts_oi <- counts[, sample_info_oi$sample_id]
-  counts_oi <- counts_oi[apply(counts_oi, 1, mean) >= 1, ]
-  
-  # build linear model
-  group <- sample_info_oi$population_id
-  mm <- model.matrix(~0 + group)
-  y <- voom(counts_oi, mm)
-  
-  fit <- lmFit(y, mm)
-  
-  # get differential expression for each reference population
-  differential_expression <- lapply(populations_reference, function(population_reference) {
-    contr_formula <- paste0("group", population_oi, "-", "group", population_reference)
-    contr <- makeContrasts(contrasts = contr_formula, levels = colnames(coef(fit)))
-    contr_fit <- contrasts.fit(fit, contr)
-    
-    ebayes_fit <- eBayes(contr_fit)
-    top.table <- topTable(ebayes_fit, sort.by = "P", number = Inf)
-    top.table %>% 
-      rownames_to_column("gene_id") %>% 
-      mutate(
-        population_1 = population_oi,
-        population_2 = population_reference
-      )
-  }) %>% 
-    bind_rows()
-}
-```
+We can do a differential expression for many different populations. The
+genes of interest are then for example the genes that are upregulated in
+our population of interest compared to all other “reference”
+populations. In our case, the reference are all types of
+macrophages.
 
 ``` r
-populations_reference <- c("MF.F.PC","MF.alv.11cp64pSiglecFp.Lu" , "MF.480p.SP")
-population_oi <- "MF.KC.Clec4FpTim4p64p.Lv"
+populations_reference <- c("MF.KC.Clec4FpTim4p64p.Lv", "MF.F.PC", "MF.480p.SP")
+population_oi <- "MF.alv.11cp64pSiglecFp.Lu"
 differential_expression <- get_marker_genes(counts, sample_info, populations_reference, population_oi)
-```
-
-``` r
-markers <- differential_expression %>% 
-  group_by(gene_id) %>% 
-  summarise(max_adj_pval = max(adj.P.Val), min_logfc = min(logFC)) %>% 
-  filter(max_adj_pval < 0.05, min_logfc > 2) %>% 
-  pull(gene_id)
-
-samples_oi <- sample_info %>% filter(population_id %in% c(population_oi, populations_reference)) %>% pull(sample_id)
-expression_oi <- log2(counts/colSums(counts) + 1)[markers, samples_oi]
-expression_oi_scaled <- t(scale(t(expression_oi)))
-pheatmap::pheatmap(expression_oi_scaled)
 ```
 
 ![](task_files/figure-gfm/unnamed-chunk-15-1.png)<!-- -->
@@ -274,29 +195,45 @@ genes_oi <- intersect(markers, tfs)
 cat(paste0(genes_oi, collapse = "\n"))
 ```
 
-    ## Bcl6b
-    ## Erg
-    ## Gata4
-    ## Hey1
-    ## Hic1
-    ## Hnf4a
-    ## Id3
-    ## Ifi205
-    ## Ifi208
-    ## Meis2
-    ## Nfib
-    ## Nfxl1
-    ## Nr1h4
-    ## Nr2f2
-    ## Ppara
-    ## Rorc
-    ## Smad6
-    ## Sox18
-    ## Tead4
+    ## Bhlhe41
+    ## Cebpa
+    ## Cebpb
+    ## Cebpd
+    ## Ctnnb1
+    ## Foxf1
+    ## Gtf3a
+    ## Hes6
+    ## Hes7
+    ## Maff
+    ## Mkx
+    ## Ovol2
+    ## Plscr1
+    ## Rara
+    ## Rfx2
+    ## Runx1
+    ## Runx2
+    ## Snai3
+    ## Spi1
+    ## Tfeb
+    ## Thap11
+    ## Trerf1
+    ## Zbtb7a
+    ## Zfp296
+    ## Zfp358
 
-Submit this to
+We’re lucky that we here get about 20 genes. What would you do if you
+get 500 genes? You might for example be a bit stricter and select the 20
+genes that have the highest expression in our population of interest.
+What would you do if you get 2 genes? You can loosen the restrictions a
+bit and allow that the genes are also expressed in one or two of the
+reference populations.
+
+We can submit this list to …
 <https://portals.broadinstitute.org/gpp/public/analysis-tools/sgrna-design>
-(or any related tool)
+(or any related tool). This will search for appropriate gRNA sequences.
+It will try to avoid off-targets by doing a BLAST search against the
+genome of interest, and selecting those gRNAs that are only found once,
+i.e. at the location of interest.
 
 ``` r
 sgrna_design <- read_tsv("results/sgrna_designs.txt")
@@ -365,6 +302,31 @@ sgrna_design %>%
     ## 19 Tead4  Tead4                CGGTGCGGAGGGTGAGGGGG
 
 Time to start cloning\!
+
+## Analysis
+
+To analyze the data, you need to know for each read the cell to which it
+belongs (cell barcode) and how this cell was perturbed (gRNA barcode).
+
+Analyzing the data happens in two steps: preprocessing and modelling.
+
+In the preprocessing step, you count the number of molecules that are
+part of each cell. You also assign to each cell with which vector it was
+transfected, so that you know which genes were affected in your cell.
+
+In the modelling step, you have a look at the effect of the perturbation
+on your cell of interest. These analyses can be:
+
+  - Finding modules of genes that are affected by different
+    perturbations. These modules can have functions, e.g. a module that
+    is related to lipid metabolism.
+  - If you combine perturbations of different genes, you can also
+    analyze interactions between genes, e.g. whether they work
+    synergistically, antagonistically, …
+
+The current state-of-the-art of CRISPR screen modelling is probably:
+<https://science.sciencemag.org/content/365/6455/786/tab-figures-data>
+together.
 
 ## References
 
